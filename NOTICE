@@ -1,0 +1,9 @@
+tiny-lsm
+
+This project is derived from Mini-LSM (<https://github.com/skyzh/mini-lsm>),
+an educational LSM-tree key-value storage implementation.
+
+Mini-LSM is copyright (c) 2022-2025 Alex Chi Z and contributors.
+
+This derivative is distributed under the Apache License, Version 2.0
+(the same license as Mini-LSM). See LICENSE for the full text.

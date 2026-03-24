@@ -1,0 +1,5 @@
+/target
+.vscode/
+*.db/
+mini-lsm.db/
+lsm.db/
