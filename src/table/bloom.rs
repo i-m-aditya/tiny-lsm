@@ -38,6 +38,7 @@ impl<T: AsRef<[u8]>> BitSlice for T {
     fn get_bit(&self, idx: usize) -> bool {
         let pos = idx / 8;
         let offset = idx % 8;
+        println!("Pos: {}, offset: {}", pos, offset);
         (self.as_ref()[pos] & (1 << offset)) != 0
     }
 
@@ -92,7 +93,18 @@ impl Bloom {
         let mut filter = BytesMut::with_capacity(nbytes);
         filter.resize(nbytes, 0);
 
-        // TODO: build the bloom filter
+        for h in keys.iter() {
+            let delta = h.rotate_left(15); // h is the key hash
+
+            let mut h = *h;
+            for _ in 0..k {
+                let bit_position = (h as usize) % nbits;
+
+                filter.set_bit(bit_position, true);
+
+                h = h.wrapping_add(delta);
+            }
+        }
 
         Self {
             filter: filter.freeze(),
@@ -113,5 +125,23 @@ impl Bloom {
 
             true
         }
+    }
+
+    pub fn key_hash(key: u32, num_bits: u32) {}
+}
+
+#[cfg(test)]
+mod tt {
+    use super::*;
+
+    #[test]
+    fn test_get_bit() {
+        let val = [1, 7, 3, 4];
+
+        println!("{:?}", val);
+        let val = Bytes::copy_from_slice(&val[..]);
+
+        let output = val.get_bit(10);
+        println!("Output: {}", output);
     }
 }
