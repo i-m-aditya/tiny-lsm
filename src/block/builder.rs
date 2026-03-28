@@ -62,19 +62,47 @@ impl BlockBuilder {
 
         if self.first_key.is_empty() {
             self.first_key.append(key.raw_ref());
+            self.offsets.push(self.data.len() as u16);
+
+            let key_len = key.len() as u16;
+
+            let value_len = value.len() as u16;
+
+            self.offsets.push(self.data.len() as u16);
+            // Then append the parts:
+            self.data.extend_from_slice(&key_len.to_be_bytes());
+            self.data.extend_from_slice(key.raw_ref());
+            self.data.extend_from_slice(&value_len.to_be_bytes());
+            self.data.extend_from_slice(value);
+        } else {
+            self.offsets.push(self.data.len() as u16);
+            let key_overlap_len =
+                common_prefix(self.first_key.raw_ref(), key.for_testing_key_ref());
+
+            if key_overlap_len != 0 {
+                let key_len = key.len() as u16;
+                let value_len = value.len() as u16;
+
+                self.data
+                    .extend_from_slice(&(key_overlap_len as u16).to_be_bytes());
+                self.data.extend_from_slice(
+                    &((key.raw_ref().len() - key_overlap_len) as u16).to_be_bytes(),
+                );
+                self.data
+                    .extend_from_slice(&key.raw_ref()[key_overlap_len..]);
+                self.data.extend_from_slice(&value_len.to_be_bytes());
+                self.data.extend_from_slice(value);
+            } else {
+                let key_len = key.len() as u16;
+                let value_len = value.len() as u16;
+
+                // Then append the parts:
+                self.data.extend_from_slice(&key_len.to_be_bytes());
+                self.data.extend_from_slice(key.raw_ref());
+                self.data.extend_from_slice(&value_len.to_be_bytes());
+                self.data.extend_from_slice(value);
+            }
         }
-
-        self.offsets.push(self.data.len() as u16);
-
-        let key_len = key.len() as u16;
-
-        let value_len = value.len() as u16;
-
-        // Then append the parts:
-        self.data.extend_from_slice(&key_len.to_be_bytes());
-        self.data.extend_from_slice(key.raw_ref());
-        self.data.extend_from_slice(&value_len.to_be_bytes());
-        self.data.extend_from_slice(value);
 
         true
     }
@@ -91,4 +119,8 @@ impl BlockBuilder {
             offsets: self.offsets,
         }
     }
+}
+
+pub fn common_prefix(a: &[u8], b: &[u8]) -> usize {
+    a.iter().zip(b.iter()).take_while(|(x, y)| x == y).count()
 }

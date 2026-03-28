@@ -16,12 +16,11 @@
 #![allow(dead_code)] // TODO(you): remove this lint after implementing this mod
 
 use std::collections::HashMap;
-use std::fs::{self, File};
+use std::fs::{self};
 use std::ops::Bound;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
-use std::thread::JoinHandle;
 
 use anyhow::Result;
 use bytes::Bytes;

@@ -44,6 +44,7 @@ impl Block {
     }
 
     /// Decode from the data layout, transform the input `data` to a single `Block`
+    /// data | offsets |
     pub fn decode(data: &[u8]) -> Self {
         let data_len = data.len();
         let num_entries = u16::from_be_bytes(

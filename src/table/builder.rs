@@ -60,6 +60,7 @@ impl SsTableBuilder {
         // update the key_hashes
         let key_hash = farmhash::fingerprint32(key.raw_ref());
         self.key_hashes.push(key_hash);
+
         // Track first key in SSTable
         if self.first_key.is_empty() {
             self.first_key = key.raw_ref().to_vec();

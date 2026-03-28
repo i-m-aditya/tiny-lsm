@@ -135,32 +135,71 @@ impl BlockIterator {
         let data_entry = &self.block.data[offset..];
         let mut cursor = 0_usize;
 
-        let key_len = u16::from_be_bytes(
-            data_entry[cursor..cursor + 2]
-                .try_into()
-                .expect("Slice len is less than 2"),
-        );
-        cursor += 2;
+        if !self.first_key.is_empty() {
+            let key_overlap_len = u16::from_be_bytes(
+                data_entry[cursor..cursor + 2]
+                    .try_into()
+                    .expect("slice len less than 2"),
+            );
+            cursor += 2;
 
-        let key = &data_entry[cursor..cursor + key_len as usize];
-        cursor += key_len as usize;
+            let rest_len = u16::from_be_bytes(
+                data_entry[cursor..cursor + 2]
+                    .try_into()
+                    .expect("slice len less than 2"),
+            );
+            cursor += 2;
 
-        let value_len = u16::from_be_bytes(
-            data_entry[cursor..cursor + 2]
-                .try_into()
-                .expect("Slice len less than 2"),
-        );
-        cursor += 2;
+            let rest = &data_entry[cursor..cursor + rest_len as usize];
+            let mut key = Vec::new();
+            key.extend_from_slice(&self.first_key.raw_ref()[0..key_overlap_len as usize]);
+            key.extend_from_slice(rest);
 
-        self.key.clear();
-        self.key.append(key);
+            cursor += rest_len as usize;
+            let value_len = u16::from_be_bytes(
+                data_entry[cursor..cursor + 2]
+                    .try_into()
+                    .expect("Slice len less than 2"),
+            );
+            cursor += 2;
 
-        if self.first_key.is_empty() {
-            self.first_key.append(key);
+            self.key.clear();
+            self.key.append(key.as_ref());
+
+            if self.first_key.is_empty() {
+                self.first_key.append(key.as_ref());
+            }
+
+            let value_start = offset + cursor;
+            self.value_range = (value_start, value_start + value_len as usize);
+        } else {
+            let key_len = u16::from_be_bytes(
+                data_entry[cursor..cursor + 2]
+                    .try_into()
+                    .expect("Slice len is less than 2"),
+            );
+            cursor += 2;
+
+            let key = &data_entry[cursor..cursor + key_len as usize];
+            cursor += key_len as usize;
+
+            let value_len = u16::from_be_bytes(
+                data_entry[cursor..cursor + 2]
+                    .try_into()
+                    .expect("Slice len less than 2"),
+            );
+            cursor += 2;
+
+            self.key.clear();
+            self.key.append(key);
+
+            if self.first_key.is_empty() {
+                self.first_key.append(key);
+            }
+
+            let value_start = offset + cursor;
+            self.value_range = (value_start, value_start + value_len as usize);
         }
-
-        let value_start = offset + cursor;
-        self.value_range = (value_start, value_start + value_len as usize);
     }
 
     /// Seek to the first key that >= `key`.
