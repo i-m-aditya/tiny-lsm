@@ -166,7 +166,7 @@ impl SsTableBuilder {
             block_cache,
             first_key: Key::from_bytes(Bytes::copy_from_slice(&self.first_key)),
             last_key: Key::from_bytes(Bytes::copy_from_slice(&self.last_key)),
-            bloom: None,
+            bloom: Some(bloom),
             max_ts: 0,
         })
     }

@@ -333,6 +333,12 @@ impl LsmStorageInner {
 
         for l0_sst in &snapshot.l0_sstables {
             if let Some(sst) = snapshot.sstables.get(l0_sst) {
+                if let Some(bloom) = &sst.bloom {
+                    let key_hash = farmhash::fingerprint32(ks.raw_ref());
+                    if !bloom.may_contain(key_hash) {
+                        continue;
+                    }
+                }
                 let sst_iterator = SsTableIterator::create_and_seek_to_key(sst.clone(), ks)?;
                 if sst_iterator.is_valid() && sst_iterator.key().raw_ref() == key {
                     let value = Bytes::copy_from_slice(sst_iterator.value());

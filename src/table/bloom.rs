@@ -121,7 +121,15 @@ impl Bloom {
             let nbits = self.filter.bit_len();
             let delta = h.rotate_left(15);
 
-            // TODO: probe the bloom filter
+            let mut h = h;
+            for _ in 0..self.k {
+                let bit_pos = (h as usize) % nbits;
+
+                if !self.filter.get_bit(bit_pos) {
+                    return false;
+                }
+                h = h.wrapping_add(delta);
+            }
 
             true
         }
