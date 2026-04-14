@@ -22,7 +22,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use anyhow::Result;
 use bytes::Bytes;
-use crossbeam_skiplist::{SkipMap, map};
+use crossbeam_skiplist::SkipMap;
 use ouroboros::self_referencing;
 
 use crate::iterators::StorageIterator;

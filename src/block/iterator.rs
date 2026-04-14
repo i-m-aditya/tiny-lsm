@@ -17,7 +17,12 @@
 
 use std::sync::Arc;
 
-use crate::key::{KeySlice, KeyVec};
+use bytes::Buf as _;
+
+use crate::{
+    block::SIZEOF_U16,
+    key::{KeySlice, KeyVec},
+};
 
 use super::Block;
 
@@ -38,48 +43,19 @@ pub struct BlockIterator {
 impl BlockIterator {
     fn new(block: Arc<Block>) -> Self {
         Self {
+            first_key: block.get_first_key(),
             block,
             key: KeyVec::new(),
             value_range: (0, 0),
             idx: 0,
-            first_key: KeyVec::new(),
         }
     }
 
     /// Creates a block iterator and seek to the first entry.
     pub fn create_and_seek_to_first(block: Arc<Block>) -> Self {
-        let data_entry = if block.offsets.len() > 1 {
-            &block.data[block.offsets[0] as usize..block.offsets[1] as usize]
-        } else {
-            &block.data
-        };
-
-        let mut cursor = 0_usize;
-        let key_len = u16::from_be_bytes(
-            data_entry[cursor..cursor + 2]
-                .try_into()
-                .expect("Slice len is less than 2"),
-        );
-
-        cursor += 2;
-        let key = &data_entry[cursor..(cursor + key_len as usize)];
-        cursor += key_len as usize;
-
-        let value_len = u16::from_be_bytes(
-            data_entry[cursor..cursor + 2]
-                .try_into()
-                .expect("Slice len less than 2"),
-        );
-
-        cursor += 2;
-        let value = &data_entry[cursor..(cursor + value_len as usize)];
-        BlockIterator {
-            block: block.clone(),
-            key: KeyVec::from_vec(key.to_vec()),
-            value_range: (cursor, cursor + value_len as usize),
-            idx: 0,
-            first_key: KeyVec::from_vec(key.to_vec()),
-        }
+        let mut iter = Self::new(block);
+        iter.seek_to_first();
+        iter
     }
 
     /// Creates a block iterator and seek to the first key that >= `key`.
@@ -132,81 +108,26 @@ impl BlockIterator {
 
     /// Seek to the specified position and update the current `key` and `value`
     fn seek_to_offset(&mut self, offset: usize) {
-        let data_entry = &self.block.data[offset..];
-        let mut cursor = 0_usize;
-
-        if !self.first_key.is_empty() {
-            let key_overlap_len = u16::from_be_bytes(
-                data_entry[cursor..cursor + 2]
-                    .try_into()
-                    .expect("slice len less than 2"),
-            );
-            cursor += 2;
-
-            let rest_len = u16::from_be_bytes(
-                data_entry[cursor..cursor + 2]
-                    .try_into()
-                    .expect("slice len less than 2"),
-            );
-            cursor += 2;
-
-            let rest = &data_entry[cursor..cursor + rest_len as usize];
-            let mut key = Vec::new();
-            key.extend_from_slice(&self.first_key.raw_ref()[0..key_overlap_len as usize]);
-            key.extend_from_slice(rest);
-
-            cursor += rest_len as usize;
-            let value_len = u16::from_be_bytes(
-                data_entry[cursor..cursor + 2]
-                    .try_into()
-                    .expect("Slice len less than 2"),
-            );
-            cursor += 2;
-
-            self.key.clear();
-            self.key.append(key.as_ref());
-
-            if self.first_key.is_empty() {
-                self.first_key.append(key.as_ref());
-            }
-
-            let value_start = offset + cursor;
-            self.value_range = (value_start, value_start + value_len as usize);
-        } else {
-            let key_len = u16::from_be_bytes(
-                data_entry[cursor..cursor + 2]
-                    .try_into()
-                    .expect("Slice len is less than 2"),
-            );
-            cursor += 2;
-
-            let key = &data_entry[cursor..cursor + key_len as usize];
-            cursor += key_len as usize;
-
-            let value_len = u16::from_be_bytes(
-                data_entry[cursor..cursor + 2]
-                    .try_into()
-                    .expect("Slice len less than 2"),
-            );
-            cursor += 2;
-
-            self.key.clear();
-            self.key.append(key);
-
-            if self.first_key.is_empty() {
-                self.first_key.append(key);
-            }
-
-            let value_start = offset + cursor;
-            self.value_range = (value_start, value_start + value_len as usize);
-        }
+        let mut entry = &self.block.data[offset..];
+        let overlap_len = entry.get_u16() as usize;
+        let key_suffix_len = entry.get_u16() as usize;
+        let key_suffix = &entry[..key_suffix_len];
+        self.key.clear();
+        self.key
+            .append(&self.first_key.raw_ref()[..overlap_len]);
+        self.key.append(key_suffix);
+        entry.advance(key_suffix_len);
+        let value_len = entry.get_u16() as usize;
+        let value_offset_begin = offset + SIZEOF_U16 + SIZEOF_U16 + key_suffix_len + SIZEOF_U16;
+        let value_offset_end = value_offset_begin + value_len;
+        self.value_range = (value_offset_begin, value_offset_end);
+        entry.advance(value_len);
     }
 
     /// Seek to the first key that >= `key`.
     /// Note: You should assume the key-value pairs in the block are sorted when being added by
     /// callers.
     pub fn seek_to_key(&mut self, key: KeySlice) {
-        // use binary search to find the key
         let (mut start, mut end) = (0, self.block.offsets.len());
         let mut mid;
         while start < end {

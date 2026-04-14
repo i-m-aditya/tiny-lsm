@@ -152,12 +152,25 @@ impl SsTable {
         let encoded_sst = file.read(0, file.size())?;
         let sst_len = encoded_sst.len();
 
-        // Read metadata offset from last 4 bytes
-        let meta_offset =
+        // Layout from `SsTableBuilder::build`: ... | block_meta bytes | u32(block_meta_offset) |
+        // u32(bloom_len) | bloom | u32(bloom_offset). Last 4 bytes are bloom_offset (where bloom_len
+        // starts); the 4 bytes before that repeat block_meta_offset.
+        let bloom_section_start =
             u32::from_be_bytes(encoded_sst[sst_len - 4..].try_into().unwrap()) as usize;
+        let block_meta_offset = u32::from_be_bytes(
+            encoded_sst[bloom_section_start - 4..bloom_section_start]
+                .try_into()
+                .unwrap(),
+        ) as usize;
 
-        // Decode block metadata
-        let block_meta = BlockMeta::decode_block_meta(&encoded_sst[meta_offset..sst_len - 4]);
+        // Only the encoded BlockMeta payload (not the trailing u32(block_meta_offset))
+        let block_meta = BlockMeta::decode_block_meta(
+            &encoded_sst[block_meta_offset..bloom_section_start - 4],
+        );
+
+        let bloom_blob = &encoded_sst[bloom_section_start..sst_len - 4];
+        let bloom_payload_len = u32::from_be_bytes(bloom_blob[0..4].try_into().unwrap()) as usize;
+        let bloom = Bloom::decode(&bloom_blob[4..4 + bloom_payload_len])?;
 
         let first_key = block_meta[0].first_key.clone();
         let last_key = block_meta[block_meta.len() - 1].last_key.clone();
@@ -165,12 +178,12 @@ impl SsTable {
         Ok(SsTable {
             file,
             block_meta,
-            block_meta_offset: meta_offset,
+            block_meta_offset,
             id,
             block_cache,
             first_key,
             last_key,
-            bloom: None,
+            bloom: Some(bloom),
             max_ts: 0,
         })
     }
