@@ -27,7 +27,7 @@ use ouroboros::self_referencing;
 
 use crate::iterators::StorageIterator;
 use crate::key::KeySlice;
-use crate::table::{SsTable, SsTableBuilder};
+use crate::table::SsTableBuilder;
 use crate::wal::Wal;
 
 /// A basic mem-table based on crossbeam-skiplist.

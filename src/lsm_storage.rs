@@ -481,26 +481,28 @@ impl LsmStorageInner {
         };
 
         if let Some(memtable) = memtable_to_flush {
-            // flush this table
             let mut ss_table_builder = SsTableBuilder::new(self.options.block_size);
 
             memtable.flush(&mut ss_table_builder)?;
 
-            let sst_id = self.next_sst_id();
-            // println!("Suspect 1");
+            let sst_id = memtable.id();
             let sst_path = self.path_of_sst(sst_id);
             let ss_table =
                 ss_table_builder.build(sst_id, Some(self.block_cache.clone()), sst_path)?;
 
             {
-                // println!("Suspect 3");
                 let _state_lock = self.state_lock.lock();
                 let mut guard = self.state.write();
                 let mut new_state = guard.as_ref().clone();
 
-                new_state.imm_memtables.pop();
+                let mem = new_state.imm_memtables.pop().unwrap();
+                assert_eq!(mem.id(), sst_id);
 
-                new_state.l0_sstables.insert(0, sst_id);
+                if self.compaction_controller.flush_to_l0() {
+                    new_state.l0_sstables.insert(0, sst_id);
+                } else {
+                    new_state.levels.insert(0, (sst_id, vec![sst_id]));
+                }
 
                 new_state.sstables.insert(sst_id, Arc::new(ss_table));
 
