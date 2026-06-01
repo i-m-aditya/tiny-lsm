@@ -267,7 +267,33 @@ impl LsmStorageInner {
                     task.compact_to_bottom_level(),
                 )
             }
-            _ => unimplemented!(),
+            CompactionTask::Leveled(task) => {
+                let mut lower_ssts = Vec::with_capacity(task.lower_level_sst_ids.len());
+                for id in &task.lower_level_sst_ids {
+                    lower_ssts.push(snapshot.sstables.get(id).unwrap().clone());
+                }
+                let lower_iter = SstConcatIterator::create_and_seek_to_first(lower_ssts)?;
+
+                if task.upper_level.is_none() {
+                    let mut l0_iters = Vec::with_capacity(task.upper_level_sst_ids.len());
+                    for id in &task.upper_level_sst_ids {
+                        l0_iters.push(Box::new(SsTableIterator::create_and_seek_to_first(
+                            snapshot.sstables.get(id).unwrap().clone(),
+                        )?));
+                    }
+                    let upper_iter = MergeIterator::create(l0_iters);
+                    let iter = TwoMergeIterator::create(upper_iter, lower_iter)?;
+                    self.compact_generate_sst_from_iter(iter, task.is_lower_level_bottom_level)
+                } else {
+                    let mut upper_ssts = Vec::with_capacity(task.upper_level_sst_ids.len());
+                    for id in &task.upper_level_sst_ids {
+                        upper_ssts.push(snapshot.sstables.get(id).unwrap().clone());
+                    }
+                    let upper_iter = SstConcatIterator::create_and_seek_to_first(upper_ssts)?;
+                    let iter = TwoMergeIterator::create(upper_iter, lower_iter)?;
+                    self.compact_generate_sst_from_iter(iter, task.is_lower_level_bottom_level)
+                }
+            }
         }
     }
 
