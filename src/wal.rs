@@ -1,26 +1,9 @@
-// REMOVE THIS LINE after fully implementing this functionality
-// Copyright (c) 2022-2025 Alex Chi Z
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-#![allow(unused_variables)] // TODO(you): remove this lint after implementing this mod
-#![allow(dead_code)] // TODO(you): remove this lint after implementing this mod
-
 use anyhow::Result;
 use bytes::Bytes;
 use crossbeam_skiplist::SkipMap;
 use parking_lot::Mutex;
-use std::fs::File;
-use std::io::BufWriter;
+use std::fs::{File, OpenOptions};
+use std::io::{BufWriter, Write};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -31,24 +14,47 @@ pub struct Wal {
 }
 
 impl Wal {
-    pub fn create(_path: impl AsRef<Path>) -> Result<Self> {
-        unimplemented!()
+    pub fn create(path: impl AsRef<Path>) -> Result<Self> {
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(path)?;
+
+        let buf_writer = BufWriter::new(file);
+        Ok(Self {
+            file: Arc::new(Mutex::new(buf_writer)),
+        })
     }
 
     pub fn recover(_path: impl AsRef<Path>, _skiplist: &SkipMap<Bytes, Bytes>) -> Result<Self> {
         unimplemented!()
     }
 
-    pub fn put(&self, _key: &[u8], _value: &[u8]) -> Result<()> {
-        unimplemented!()
+    pub fn put(&self, key: &[u8], value: &[u8]) -> Result<()> {
+        let mut data = Vec::new();
+
+        data.extend_from_slice(&key.len().to_be_bytes());
+        data.extend_from_slice(key);
+        data.extend_from_slice(&value.len().to_be_bytes());
+        data.extend_from_slice(value);
+
+        let mut file_guard = self.file.lock();
+        file_guard.write_all(data.as_slice())?;
+        Ok(())
     }
 
-    /// Implement this in week 3, day 5; if you want to implement this earlier, use `&[u8]` as the key type.
-    pub fn put_batch(&self, _data: &[(KeySlice, &[u8])]) -> Result<()> {
-        unimplemented!()
+    pub fn put_batch(&self, data: &[(KeySlice, &[u8])]) -> Result<()> {
+        for (key, value) in data {
+            self.put(key.raw_ref(), value)?;
+        }
+        Ok(())
     }
 
     pub fn sync(&self) -> Result<()> {
-        unimplemented!()
+        let mut file_guard = self.file.lock();
+        file_guard.flush()?;
+        file_guard.get_mut().sync_all()?;
+        Ok(())
     }
 }
