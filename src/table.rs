@@ -1,20 +1,3 @@
-// Copyright (c) 2022-2025 Alex Chi Z
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
-#![allow(unused_variables)] // TODO(you): remove this lint after implementing this mod
-#![allow(dead_code)] // TODO(you): remove this lint after implementing this mod
-
 pub(crate) mod bloom;
 mod builder;
 mod iterator;
@@ -53,39 +36,45 @@ impl BlockMeta {
         #[allow(clippy::ptr_arg)] // remove this allow after you finish
         buf: &mut Vec<u8>,
     ) {
-        for b_m in block_meta {
-            buf.extend_from_slice(&(b_m.offset as u32).to_be_bytes());
-            buf.extend_from_slice(&(b_m.first_key.len() as u16).to_be_bytes());
-            buf.extend_from_slice(b_m.first_key.raw_ref());
-            buf.extend_from_slice(&(b_m.last_key.len() as u16).to_be_bytes());
-            buf.extend_from_slice(b_m.last_key.raw_ref());
+        let start = buf.len();
+        buf.extend_from_slice(&(block_meta.len() as u32).to_be_bytes());
+        for bm in block_meta {
+            buf.extend_from_slice(&(bm.offset as u32).to_be_bytes());
+            buf.extend_from_slice(&(bm.first_key.len() as u16).to_be_bytes());
+            buf.extend_from_slice(bm.first_key.raw_ref());
+            buf.extend_from_slice(&(bm.last_key.len() as u16).to_be_bytes());
+            buf.extend_from_slice(bm.last_key.raw_ref());
         }
+        let checksum = crc32fast::hash(&buf[start..]);
+        buf.extend_from_slice(&checksum.to_be_bytes());
     }
 
     /// Decode block meta from a buffer.
-    pub fn decode_block_meta(buf: impl Buf) -> Vec<BlockMeta> {
-        let mut buf = buf;
+    pub fn decode_block_meta(buf: &[u8]) -> Result<Vec<BlockMeta>> {
+        let data_len = buf.len() - std::mem::size_of::<u32>();
+        let expected = crc32fast::hash(&buf[..data_len]);
+        let actual = u32::from_be_bytes(buf[data_len..].try_into().unwrap());
+        anyhow::ensure!(expected == actual, "block meta checksum mismatch");
 
-        let mut b_m = Vec::new();
+        let mut reader: &[u8] = &buf[..data_len];
+        let num_blocks = reader.get_u32() as usize;
+        let mut bm = Vec::with_capacity(num_blocks);
 
-        while buf.has_remaining() {
-            let block_offset = buf.get_u32();
-            let first_key_len = buf.get_u16();
+        for _ in 0..num_blocks {
+            let block_offset = reader.get_u32();
+            let first_key_len = reader.get_u16();
             let mut first_key = vec![0; first_key_len as usize];
-
-            buf.copy_to_slice(&mut first_key);
-
-            let last_key_len = buf.get_u16();
+            reader.copy_to_slice(&mut first_key);
+            let last_key_len = reader.get_u16();
             let mut last_key = vec![0; last_key_len as usize];
-
-            buf.copy_to_slice(&mut last_key);
-            b_m.push(BlockMeta {
+            reader.copy_to_slice(&mut last_key);
+            bm.push(BlockMeta {
                 offset: block_offset as usize,
                 first_key: Key::from_bytes(Bytes::from(first_key)),
                 last_key: Key::from_bytes(Bytes::from(last_key)),
             });
         }
-        b_m
+        Ok(bm)
     }
 }
 
@@ -166,7 +155,7 @@ impl SsTable {
         // Only the encoded BlockMeta payload (not the trailing u32(block_meta_offset))
         let block_meta = BlockMeta::decode_block_meta(
             &encoded_sst[block_meta_offset..bloom_section_start - 4],
-        );
+        )?;
 
         let bloom_blob = &encoded_sst[bloom_section_start..sst_len - 4];
         let bloom_payload_len = u32::from_be_bytes(bloom_blob[0..4].try_into().unwrap()) as usize;
@@ -210,19 +199,22 @@ impl SsTable {
 
     /// Read a block from the disk.
     pub fn read_block(&self, block_idx: usize) -> Result<Arc<Block>> {
-        let block_meta = &self.block_meta[block_idx];
-        let offset = block_meta.offset;
+        let offset = self.block_meta[block_idx].offset;
 
-        let block_len = if block_idx + 1 < self.block_meta.len() {
+        let block_len_with_checksum = if block_idx + 1 < self.block_meta.len() {
             self.block_meta[block_idx + 1].offset - offset
         } else {
             self.block_meta_offset - offset
         };
 
-        let block_data = self.file.read(offset as u64, block_len as u64)?;
-        let block = Block::decode(&block_data);
+        let block_len = block_len_with_checksum - std::mem::size_of::<u32>();
+        let raw = self.file.read(offset as u64, block_len_with_checksum as u64)?;
 
-        Ok(Arc::new(block))
+        let expected = crc32fast::hash(&raw[..block_len]);
+        let actual = u32::from_be_bytes(raw[block_len..].try_into().unwrap());
+        anyhow::ensure!(expected == actual, "block checksum mismatch");
+
+        Ok(Arc::new(Block::decode(&raw[..block_len])))
     }
 
     /// Read a block from disk, with block cache. (Day 4)

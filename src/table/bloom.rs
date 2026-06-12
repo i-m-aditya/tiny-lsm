@@ -1,19 +1,3 @@
-// Copyright (c) 2022-2025 Alex Chi Z
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
-// Copyright 2021 TiKV Project Authors. Licensed under Apache-2.0.
-
 use anyhow::Result;
 use bytes::{BufMut, Bytes, BytesMut};
 
@@ -62,8 +46,12 @@ impl<T: AsMut<[u8]>> BitSliceMut for T {
 impl Bloom {
     /// Decode a bloom filter
     pub fn decode(buf: &[u8]) -> Result<Self> {
-        let filter = &buf[..buf.len() - 1];
-        let k = buf[buf.len() - 1];
+        let data_len = buf.len() - std::mem::size_of::<u32>();
+        let expected = crc32fast::hash(&buf[..data_len]);
+        let actual = u32::from_be_bytes(buf[data_len..].try_into().unwrap());
+        anyhow::ensure!(expected == actual, "bloom filter checksum mismatch");
+        let k = buf[data_len - 1];
+        let filter = &buf[..data_len - 1];
         Ok(Self {
             filter: filter.to_vec().into(),
             k,
@@ -72,8 +60,11 @@ impl Bloom {
 
     /// Encode a bloom filter
     pub fn encode(&self, buf: &mut Vec<u8>) {
-        buf.extend(&self.filter);
+        let start = buf.len();
+        buf.extend_from_slice(&self.filter);
         buf.put_u8(self.k);
+        let checksum = crc32fast::hash(&buf[start..]);
+        buf.put_u32(checksum);
     }
 
     /// Get bloom filter bits per key from entries count and FPR

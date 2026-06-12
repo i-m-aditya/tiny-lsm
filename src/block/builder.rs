@@ -1,20 +1,3 @@
-// Copyright (c) 2022-2025 Alex Chi Z
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
-#![allow(unused_variables)] // TODO(you): remove this lint after implementing this mod
-#![allow(dead_code)] // TODO(you): remove this lint after implementing this mod
-
 use bytes::BufMut;
 
 use crate::key::{KeySlice, KeyVec};
@@ -34,17 +17,12 @@ pub struct BlockBuilder {
 }
 
 fn compute_overlap(first_key: KeySlice, key: KeySlice) -> usize {
-    let mut i = 0;
-    loop {
-        if i >= first_key.len() || i >= key.len() {
-            break;
-        }
-        if first_key.raw_ref()[i] != key.raw_ref()[i] {
-            break;
-        }
-        i += 1;
-    }
-    i
+    first_key
+        .raw_ref()
+        .iter()
+        .zip(key.raw_ref())
+        .take_while(|(x, y)| x == y)
+        .count()
 }
 
 impl BlockBuilder {
@@ -63,11 +41,10 @@ impl BlockBuilder {
     }
 
     /// Adds a key-value pair to the block. Returns false when the block is full.
-    /// You may find the `bytes::BufMut` trait useful for manipulating binary data.
     #[must_use]
     pub fn add(&mut self, key: KeySlice, value: &[u8]) -> bool {
         assert!(!key.is_empty(), "key must not be empty");
-        if self.estimated_size() + key.len() + value.len() + SIZEOF_U16 * 3 /* key_len, value_len and offset */ > self.block_size
+        if self.estimated_size() + key.len() + value.len() + SIZEOF_U16 * 3 > self.block_size
             && !self.is_empty()
         {
             return false;

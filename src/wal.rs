@@ -1,9 +1,10 @@
 use anyhow::Result;
-use bytes::Bytes;
+use bytes::{Buf, BufMut, Bytes};
 use crossbeam_skiplist::SkipMap;
 use parking_lot::Mutex;
 use std::fs::{File, OpenOptions};
-use std::io::{BufWriter, Write};
+use std::hash::Hasher;
+use std::io::{BufWriter, Read, Write};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -21,34 +22,68 @@ impl Wal {
             .create_new(true)
             .open(path)?;
 
-        let buf_writer = BufWriter::new(file);
         Ok(Self {
-            file: Arc::new(Mutex::new(buf_writer)),
+            file: Arc::new(Mutex::new(BufWriter::new(file))),
         })
     }
 
-    pub fn recover(_path: impl AsRef<Path>, _skiplist: &SkipMap<Bytes, Bytes>) -> Result<Self> {
-        unimplemented!()
+    pub fn recover(path: impl AsRef<Path>, skiplist: &SkipMap<Bytes, Bytes>) -> Result<Self> {
+        let mut file = OpenOptions::new().read(true).write(true).open(path)?;
+
+        let mut buff = Vec::new();
+        file.read_to_end(&mut buff)?;
+        let mut data = buff.as_slice();
+
+        while !data.is_empty() {
+            let key_len = data.get_u16();
+            let key = &data[..key_len as usize];
+            data.advance(key_len as usize);
+
+            let value_len = data.get_u16();
+            let value = &data[..value_len as usize];
+            data.advance(value_len as usize);
+
+            let mut hasher = crc32fast::Hasher::new();
+            hasher.write_u16(key_len);
+            hasher.write(key);
+            hasher.write_u16(value_len);
+            hasher.write(value);
+
+            assert_eq!(hasher.finalize(), data.get_u32());
+
+            skiplist.insert(Bytes::copy_from_slice(key), Bytes::copy_from_slice(value));
+        }
+
+        Ok(Self {
+            file: Arc::new(Mutex::new(BufWriter::new(file))),
+        })
     }
 
     pub fn put(&self, key: &[u8], value: &[u8]) -> Result<()> {
-        let mut data = Vec::new();
-
-        data.extend_from_slice(&key.len().to_be_bytes());
-        data.extend_from_slice(key);
-        data.extend_from_slice(&value.len().to_be_bytes());
-        data.extend_from_slice(value);
-
         let mut file_guard = self.file.lock();
-        file_guard.write_all(data.as_slice())?;
+        let mut buf = Vec::with_capacity(key.len() + value.len() + 2 + 2 + 4);
+        let mut hasher = crc32fast::Hasher::new();
+
+        buf.put_u16(key.len() as u16);
+        hasher.write_u16(key.len() as u16);
+
+        buf.put_slice(key);
+        hasher.write(key);
+
+        buf.put_u16(value.len() as u16);
+        hasher.write_u16(value.len() as u16);
+
+        buf.put_slice(value);
+        hasher.write(value);
+
+        buf.put_u32(hasher.finalize());
+
+        file_guard.write_all(&buf)?;
         Ok(())
     }
 
-    pub fn put_batch(&self, data: &[(KeySlice, &[u8])]) -> Result<()> {
-        for (key, value) in data {
-            self.put(key.raw_ref(), value)?;
-        }
-        Ok(())
+    pub fn put_batch(&self, _data: &[(KeySlice, &[u8])]) -> Result<()> {
+        unimplemented!()
     }
 
     pub fn sync(&self) -> Result<()> {
