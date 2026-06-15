@@ -21,7 +21,9 @@ impl Block {
         buf.get_u16();
         let key_len = buf.get_u16() as usize;
         let key = &buf[..key_len];
-        KeyVec::from_vec(key.to_vec())
+        buf.advance(key_len);
+        let ts = buf.get_u64();
+        KeyVec::from_vec_with_ts(key.to_vec(), ts)
     }
 
     pub fn encode(&self) -> Bytes {

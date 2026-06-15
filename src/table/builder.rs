@@ -2,19 +2,17 @@ use std::sync::Arc;
 use std::{mem, path::Path};
 
 use anyhow::Result;
-use bytes::Bytes;
 
 use super::{BlockMeta, SsTable};
-use crate::key::Key;
+use crate::key::KeyVec;
 use crate::table::FileObject;
 use crate::table::bloom::Bloom;
 use crate::{block::BlockBuilder, key::KeySlice, lsm_storage::BlockCache};
 
-/// Builds an SSTable from key-value pairs.
 pub struct SsTableBuilder {
     builder: BlockBuilder,
-    first_key: Vec<u8>,
-    last_key: Vec<u8>,
+    first_key: KeyVec,
+    last_key: KeyVec,
     data: Vec<u8>,
     pub(crate) meta: Vec<BlockMeta>,
     block_size: usize,
@@ -22,12 +20,11 @@ pub struct SsTableBuilder {
 }
 
 impl SsTableBuilder {
-    /// Create a builder based on target block size.
     pub fn new(block_size: usize) -> Self {
         SsTableBuilder {
             builder: BlockBuilder::new(block_size),
-            first_key: Vec::new(),
-            last_key: Vec::new(),
+            first_key: KeyVec::new(),
+            last_key: KeyVec::new(),
             data: Vec::new(),
             meta: Vec::new(),
             block_size,
@@ -35,78 +32,55 @@ impl SsTableBuilder {
         }
     }
 
-    /// Adds a key-value pair to SSTable.
-    ///
-    /// Note: You should split a new block when the current block is full.(`std::mem::replace` may
-    /// be helpful here)
     pub fn add(&mut self, key: KeySlice, value: &[u8]) {
-        // update the key_hashes
-        let key_hash = farmhash::fingerprint32(key.raw_ref());
+        let key_hash = farmhash::fingerprint32(key.key_ref());
         self.key_hashes.push(key_hash);
 
-        // Track first key in SSTable
         if self.first_key.is_empty() {
-            self.first_key = key.raw_ref().to_vec();
+            self.first_key = key.to_key_vec();
         }
 
         let is_added = self.builder.add(key, value);
 
         if is_added {
-            // Successfully added to current block
-            self.last_key = key.raw_ref().to_vec();
+            self.last_key = key.to_key_vec();
         } else {
-            // Current block is full, finalize it
-
-            // Replace current builder with a new one, get the old builder
             let old_block_builder =
                 mem::replace(&mut self.builder, BlockBuilder::new(self.block_size));
 
-            // Create block metadata using the old builder's first_key and current last_key
             let block_meta = BlockMeta {
                 offset: self.data.len(),
-                first_key: Key::from_bytes(Bytes::copy_from_slice(
-                    old_block_builder.first_key.raw_ref(),
-                )),
-                last_key: Key::from_bytes(Bytes::copy_from_slice(&self.last_key)),
+                first_key: old_block_builder.first_key.clone().into_key_bytes(),
+                last_key: self.last_key.clone().into_key_bytes(),
             };
             self.meta.push(block_meta);
 
-            // Build and encode the block
             let block = old_block_builder.build();
             let encoded_block = block.encode();
             let checksum = crc32fast::hash(&encoded_block);
             self.data.extend_from_slice(&encoded_block);
             self.data.extend_from_slice(&checksum.to_be_bytes());
 
-            // Add the key-value pair to the new block
             let _ = self.builder.add(key, value);
-            self.last_key = key.raw_ref().to_vec();
+            self.last_key = key.to_key_vec();
         }
     }
 
-    /// Get the estimated size of the SSTable.
-    ///
-    /// Since the data blocks contain much more data than meta blocks, just return the size of data
-    /// blocks here.
     pub fn estimated_size(&self) -> usize {
         self.data.len()
     }
 
-    /// Builds the SSTable and writes it to the given path. Use the `FileObject` structure to manipulate the disk objects.
     pub fn build(
         #[allow(unused_mut)] mut self,
         id: usize,
         block_cache: Option<Arc<BlockCache>>,
         path: impl AsRef<Path>,
     ) -> Result<SsTable> {
-        // Finalize the last block if it has data
         if !self.builder.is_empty() {
             let block_meta = BlockMeta {
                 offset: self.data.len(),
-                first_key: Key::from_bytes(Bytes::copy_from_slice(
-                    self.builder.first_key.raw_ref(),
-                )),
-                last_key: Key::from_bytes(Bytes::copy_from_slice(&self.last_key)),
+                first_key: self.builder.first_key.clone().into_key_bytes(),
+                last_key: self.last_key.clone().into_key_bytes(),
             };
             self.meta.push(block_meta);
 
@@ -117,18 +91,14 @@ impl SsTableBuilder {
             self.data.extend_from_slice(&checksum.to_be_bytes());
         }
 
-        // The block_meta_offset is where metadata starts (after all data blocks)
         let block_meta_offset = self.data.len();
 
-        // Encode block metadata
         BlockMeta::encode_block_meta(&self.meta, &mut self.data);
 
-        // Write the block metadata offset (u32)
         self.data
             .extend_from_slice(&(block_meta_offset as u32).to_be_bytes());
 
         let bloom_bits_per_key = Bloom::bloom_bits_per_key(self.key_hashes.len(), 0.01);
-
         let bloom = Bloom::build_from_key_hashes(self.key_hashes.as_ref(), bloom_bits_per_key);
 
         let mut encoded_bloom_buf = Vec::new();
@@ -143,7 +113,6 @@ impl SsTableBuilder {
         self.data
             .extend_from_slice(&(bloom_offset as u32).to_be_bytes());
 
-        // println!("Path: {:?}", path.as_ref());
         let file_obj = FileObject::create(path.as_ref(), self.data)?;
 
         Ok(SsTable {
@@ -152,8 +121,8 @@ impl SsTableBuilder {
             block_meta_offset,
             id,
             block_cache,
-            first_key: Key::from_bytes(Bytes::copy_from_slice(&self.first_key)),
-            last_key: Key::from_bytes(Bytes::copy_from_slice(&self.last_key)),
+            first_key: self.first_key.clone().into_key_bytes(),
+            last_key: self.last_key.clone().into_key_bytes(),
             bloom: Some(bloom),
             max_ts: 0,
         })

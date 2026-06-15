@@ -40,10 +40,12 @@ impl BlockMeta {
         buf.extend_from_slice(&(block_meta.len() as u32).to_be_bytes());
         for bm in block_meta {
             buf.extend_from_slice(&(bm.offset as u32).to_be_bytes());
-            buf.extend_from_slice(&(bm.first_key.len() as u16).to_be_bytes());
-            buf.extend_from_slice(bm.first_key.raw_ref());
-            buf.extend_from_slice(&(bm.last_key.len() as u16).to_be_bytes());
-            buf.extend_from_slice(bm.last_key.raw_ref());
+            buf.extend_from_slice(&(bm.first_key.key_len() as u16).to_be_bytes());
+            buf.extend_from_slice(bm.first_key.key_ref());
+            buf.extend_from_slice(&bm.first_key.ts().to_be_bytes());
+            buf.extend_from_slice(&(bm.last_key.key_len() as u16).to_be_bytes());
+            buf.extend_from_slice(bm.last_key.key_ref());
+            buf.extend_from_slice(&bm.last_key.ts().to_be_bytes());
         }
         let checksum = crc32fast::hash(&buf[start..]);
         buf.extend_from_slice(&checksum.to_be_bytes());
@@ -63,15 +65,17 @@ impl BlockMeta {
         for _ in 0..num_blocks {
             let block_offset = reader.get_u32();
             let first_key_len = reader.get_u16();
-            let mut first_key = vec![0; first_key_len as usize];
-            reader.copy_to_slice(&mut first_key);
+            let first_key = reader[..first_key_len as usize].to_vec();
+            reader.advance(first_key_len as usize);
+            let first_ts = reader.get_u64();
             let last_key_len = reader.get_u16();
-            let mut last_key = vec![0; last_key_len as usize];
-            reader.copy_to_slice(&mut last_key);
+            let last_key = reader[..last_key_len as usize].to_vec();
+            reader.advance(last_key_len as usize);
+            let last_ts = reader.get_u64();
             bm.push(BlockMeta {
                 offset: block_offset as usize,
-                first_key: Key::from_bytes(Bytes::from(first_key)),
-                last_key: Key::from_bytes(Bytes::from(last_key)),
+                first_key: Key::from_bytes_with_ts(Bytes::from(first_key), first_ts),
+                last_key: Key::from_bytes_with_ts(Bytes::from(last_key), last_ts),
             });
         }
         Ok(bm)
