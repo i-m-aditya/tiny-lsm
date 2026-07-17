@@ -147,8 +147,11 @@ impl MemTable {
         Ok(())
     }
 
-    pub fn put_batch(&self, _data: &[(KeySlice, &[u8])]) -> Result<()> {
-        unimplemented!()
+    pub fn put_batch(&self, data: &[(KeySlice, &[u8])]) -> Result<()> {
+        for (key, value) in data {
+            self.put(*key, value)?;
+        }
+        Ok(())
     }
 
     pub fn sync_wal(&self) -> Result<()> {

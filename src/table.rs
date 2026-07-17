@@ -168,6 +168,12 @@ impl SsTable {
         let first_key = block_meta[0].first_key.clone();
         let last_key = block_meta[block_meta.len() - 1].last_key.clone();
 
+        let max_ts = block_meta
+            .iter()
+            .flat_map(|m| [m.first_key.ts(), m.last_key.ts()])
+            .max()
+            .unwrap_or(0);
+
         Ok(SsTable {
             file,
             block_meta,
@@ -177,7 +183,7 @@ impl SsTable {
             first_key,
             last_key,
             bloom: Some(bloom),
-            max_ts: 0,
+            max_ts,
         })
     }
 

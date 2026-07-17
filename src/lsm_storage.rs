@@ -24,6 +24,7 @@ use crate::lsm_iterator::{FusedIterator, LsmIterator};
 use crate::manifest::{Manifest, ManifestRecord};
 use crate::mem_table::{self, MemTable};
 use crate::mvcc::LsmMvccInner;
+use crate::mvcc::txn::Transaction;
 use crate::table::{FileObject, SsTable, SsTableBuilder, SsTableIterator};
 
 pub type BlockCache = moka::sync::Cache<(usize, usize), Arc<Block>>;
@@ -233,7 +234,7 @@ impl MiniLsm {
         }))
     }
 
-    pub fn new_txn(&self) -> Result<()> {
+    pub fn new_txn(&self) -> Result<Arc<Transaction>> {
         self.inner.new_txn()
     }
 
@@ -266,7 +267,7 @@ impl MiniLsm {
         lower: Bound<&[u8]>,
         upper: Bound<&[u8]>,
     ) -> Result<FusedIterator<LsmIterator>> {
-        self.inner.scan(lower, upper)
+        self.inner.clone().scan(lower, upper)
     }
 
     /// Only call this in test cases due to race conditions
@@ -385,6 +386,19 @@ impl LsmStorageInner {
                 }
             }
 
+            // Recover the commit timestamp from the max ts seen across all data.
+            let mut max_ts = 0u64;
+            for sst in state.sstables.values() {
+                max_ts = max_ts.max(sst.max_ts());
+            }
+            for memtable in std::iter::once(&state.memtable).chain(state.imm_memtables.iter()) {
+                let mut iter = memtable.scan(Bound::Unbounded, Bound::Unbounded);
+                while iter.is_valid() {
+                    max_ts = max_ts.max(iter.key().ts());
+                    iter.next()?;
+                }
+            }
+
             let storage = Self {
                 state: Arc::new(RwLock::new(Arc::new(state))),
                 state_lock: Mutex::new(()),
@@ -394,7 +408,7 @@ impl LsmStorageInner {
                 compaction_controller,
                 manifest: Some(manifest),
                 options: options.into(),
-                mvcc: None,
+                mvcc: Some(LsmMvccInner::new(max_ts)),
                 compaction_filters: Arc::new(Mutex::new(Vec::new())),
             };
             Ok(storage)
@@ -416,7 +430,7 @@ impl LsmStorageInner {
                 compaction_controller,
                 manifest: Some(manifest),
                 options: options.into(),
-                mvcc: None,
+                mvcc: Some(LsmMvccInner::new(0)),
                 compaction_filters: Arc::new(Mutex::new(Vec::new())),
             };
             Ok(storage)
@@ -433,8 +447,13 @@ impl LsmStorageInner {
         compaction_filters.push(compaction_filter);
     }
 
-    /// Get a key from the storage. In day 7, this can be further optimized by using a bloom filter.
+    /// Get a key from the storage.
     pub fn get(&self, key: &[u8]) -> Result<Option<Bytes>> {
+        let read_ts = self.mvcc().latest_commit_ts();
+        self.get_with_ts(key, read_ts)
+    }
+
+    pub fn get_with_ts(&self, key: &[u8], read_ts: u64) -> Result<Option<Bytes>> {
         let snapshot = {
             let guard = self.state.read();
             Arc::clone(&guard)
@@ -444,16 +463,14 @@ impl LsmStorageInner {
             .memtable
             .scan(Bound::Included(key), Bound::Included(key));
 
-        let mut memtable_iters = Vec::new();
-        memtable_iters.push(Box::new(memtable_iter));
-
+        let mut in_memory_table_iters = Vec::new();
+        in_memory_table_iters.push(Box::new(memtable_iter));
         for memtable in &snapshot.imm_memtables {
-            memtable_iters.push(Box::new(
+            in_memory_table_iters.push(Box::new(
                 memtable.scan(Bound::Included(key), Bound::Included(key)),
             ));
         }
-
-        let merge_1 = MergeIterator::create(memtable_iters);
+        let merge_1 = MergeIterator::create(in_memory_table_iters);
 
         let ks = KeySlice::from_slice(key, TS_RANGE_BEGIN);
 
@@ -498,7 +515,13 @@ impl LsmStorageInner {
             level_iters.push(Box::new(level_iter));
         }
 
-        let iter = TwoMergeIterator::create(mem_l0_merge_iter, MergeIterator::create(level_iters))?;
+        let mut iter =
+            TwoMergeIterator::create(mem_l0_merge_iter, MergeIterator::create(level_iters))?;
+
+        // Advance past versions newer than the snapshot.
+        while iter.is_valid() && iter.key().key_ref() == key && iter.key().ts() > read_ts {
+            iter.next()?;
+        }
 
         if iter.is_valid() && iter.key().key_ref() == key && !iter.value().is_empty() {
             return Ok(Some(Bytes::copy_from_slice(iter.value())));
@@ -509,18 +532,20 @@ impl LsmStorageInner {
     /// Write a batch of data into the storage.
     pub fn write_batch<T: AsRef<[u8]>>(&self, batch: &[WriteBatchRecord<T>]) -> Result<()> {
         let _lck = self.mvcc().write_lock.lock();
+
         let ts = self.mvcc().latest_commit_ts() + 1;
+
+        let mut data = Vec::new();
         for record in batch {
             let (key, value): (&[u8], &[u8]) = match record {
                 WriteBatchRecord::Put(k, v) => (k.as_ref(), v.as_ref()),
                 WriteBatchRecord::Del(k) => (k.as_ref(), &[]),
             };
-            self.state
-                .read()
-                .memtable
-                .put(KeySlice::from_slice(key, ts), value)?;
-            self.try_freeze()?;
+            data.push((KeySlice::from_slice(key, ts), value));
         }
+        self.state.read().memtable.put_batch(&data)?;
+        self.try_freeze()?;
+
         self.mvcc().update_commit_ts(ts);
         Ok(())
     }
@@ -635,16 +660,25 @@ impl LsmStorageInner {
         Ok(())
     }
 
-    pub fn new_txn(&self) -> Result<()> {
-        // no-op
-        Ok(())
+    pub fn new_txn(self: &Arc<Self>) -> Result<Arc<Transaction>> {
+        Ok(self.mvcc().new_txn(self.clone(), self.options.serializable))
     }
 
     /// Create an iterator over a range of keys.
     pub fn scan(
-        &self,
+        self: &Arc<Self>,
         lower: Bound<&[u8]>,
         upper: Bound<&[u8]>,
+    ) -> Result<FusedIterator<LsmIterator>> {
+        let read_ts = self.mvcc().latest_commit_ts();
+        self.scan_with_ts(lower, upper, read_ts)
+    }
+
+    pub fn scan_with_ts(
+        self: &Arc<Self>,
+        lower: Bound<&[u8]>,
+        upper: Bound<&[u8]>,
+        read_ts: u64,
     ) -> Result<FusedIterator<LsmIterator>> {
         let snapshot = {
             let guard = self.state.read();
@@ -677,7 +711,7 @@ impl LsmStorageInner {
                             table,
                             KeySlice::from_slice(key, TS_RANGE_BEGIN),
                         )?;
-                        if iter.is_valid() && iter.key().key_ref() == key {
+                        while iter.is_valid() && iter.key().key_ref() == key {
                             iter.next()?;
                         }
                         iter
@@ -714,7 +748,7 @@ impl LsmStorageInner {
                         level_ssts,
                         KeySlice::from_slice(key, TS_RANGE_BEGIN),
                     )?;
-                    if iter.is_valid() && iter.key().key_ref() == key {
+                    while iter.is_valid() && iter.key().key_ref() == key {
                         iter.next()?;
                     }
                     iter
@@ -727,6 +761,6 @@ impl LsmStorageInner {
         let iter = TwoMergeIterator::create(memtable_iter, l0_iter)?;
         let iter = TwoMergeIterator::create(iter, MergeIterator::create(level_iters))?;
 
-        Ok(FusedIterator::new(LsmIterator::new(iter, mem_table::map_bound(upper))?))
+        Ok(FusedIterator::new(LsmIterator::new(iter, mem_table::map_bound(upper), read_ts)?))
     }
 }

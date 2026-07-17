@@ -1,20 +1,3 @@
-// Copyright (c) 2022-2025 Alex Chi Z
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
-#![allow(unused_variables)] // TODO(you): remove this lint after implementing this mod
-#![allow(dead_code)] // TODO(you): remove this lint after implementing this mod
-
 use std::{
     collections::HashSet,
     ops::Bound,
@@ -44,19 +27,50 @@ pub struct Transaction {
 
 impl Transaction {
     pub fn get(&self, key: &[u8]) -> Result<Option<Bytes>> {
-        unimplemented!()
+        if let Some(key_hashes) = &self.key_hashes {
+            let mut guard = key_hashes.lock();
+            let key_hash = farmhash::hash32(key);
+            let _ = guard.1.insert(key_hash);
+        }
+        // Check local (uncommitted) writes first.
+        if let Some(entry) = self.local_storage.get(key) {
+            if entry.value().is_empty() {
+                return Ok(None); // local tombstone
+            }
+            return Ok(Some(entry.value().clone()));
+        }
+
+        self.inner.get_with_ts(key, self.read_ts)
     }
 
     pub fn scan(self: &Arc<Self>, lower: Bound<&[u8]>, upper: Bound<&[u8]>) -> Result<TxnIterator> {
-        unimplemented!()
+        let lsm_iter = self.inner.scan_with_ts(lower, upper, self.read_ts)?;
+        let local_iter = TxnLocalIterator::create(self.local_storage.clone(), lower, upper);
+        TxnIterator::create(
+            self.clone(),
+            TwoMergeIterator::create(local_iter, lsm_iter)?,
+        )
     }
 
     pub fn put(&self, key: &[u8], value: &[u8]) {
-        unimplemented!()
+        if let Some(key_hashes) = &self.key_hashes {
+            let mut guard = key_hashes.lock();
+            let key_hash = farmhash::hash32(key);
+            let _ = guard.1.insert(key_hash);
+        }
+
+        self.local_storage
+            .insert(Bytes::copy_from_slice(key), Bytes::copy_from_slice(value));
     }
 
     pub fn delete(&self, key: &[u8]) {
-        unimplemented!()
+        if let Some(key_hashes) = &self.key_hashes {
+            let mut guard = key_hashes.lock();
+            let key_hash = farmhash::hash32(key);
+            let _ = guard.1.insert(key_hash);
+        }
+        self.local_storage
+            .insert(Bytes::copy_from_slice(key), Bytes::new());
     }
 
     pub fn commit(&self) -> Result<()> {
@@ -73,38 +87,67 @@ type SkipMapRangeIter<'a> =
 
 #[self_referencing]
 pub struct TxnLocalIterator {
-    /// Stores a reference to the skipmap.
     map: Arc<SkipMap<Bytes, Bytes>>,
-    /// Stores a skipmap iterator that refers to the lifetime of `TxnLocalIterator` itself.
     #[borrows(map)]
     #[not_covariant]
     iter: SkipMapRangeIter<'this>,
-    /// Stores the current key-value pair.
     item: (Bytes, Bytes),
+}
+
+impl TxnLocalIterator {
+    pub fn create(
+        map: Arc<SkipMap<Bytes, Bytes>>,
+        lower: Bound<&[u8]>,
+        upper: Bound<&[u8]>,
+    ) -> Self {
+        let lower = map_bound(lower);
+        let upper = map_bound(upper);
+        let mut iter = TxnLocalIteratorBuilder {
+            map,
+            iter_builder: |map| map.range((lower, upper)),
+            item: (Bytes::new(), Bytes::new()),
+        }
+        .build();
+        iter.next().unwrap();
+        iter
+    }
+}
+
+fn map_bound(bound: Bound<&[u8]>) -> Bound<Bytes> {
+    match bound {
+        Bound::Included(x) => Bound::Included(Bytes::copy_from_slice(x)),
+        Bound::Excluded(x) => Bound::Excluded(Bytes::copy_from_slice(x)),
+        Bound::Unbounded => Bound::Unbounded,
+    }
 }
 
 impl StorageIterator for TxnLocalIterator {
     type KeyType<'a> = &'a [u8];
 
     fn value(&self) -> &[u8] {
-        unimplemented!()
+        self.borrow_item().1.as_ref()
     }
 
     fn key(&self) -> &[u8] {
-        unimplemented!()
+        self.borrow_item().0.as_ref()
     }
 
     fn is_valid(&self) -> bool {
-        unimplemented!()
+        !self.borrow_item().0.is_empty()
     }
 
     fn next(&mut self) -> Result<()> {
-        unimplemented!()
+        let entry =
+            self.with_iter_mut(|iter| iter.next().map(|e| (e.key().clone(), e.value().clone())));
+        self.with_item_mut(|item| {
+            *item = entry.unwrap_or_default();
+        });
+        Ok(())
     }
 }
 
 pub struct TxnIterator {
-    _txn: Arc<Transaction>,
+    txn: Arc<Transaction>,
     iter: TwoMergeIterator<TxnLocalIterator, FusedIterator<LsmIterator>>,
 }
 
@@ -113,7 +156,35 @@ impl TxnIterator {
         txn: Arc<Transaction>,
         iter: TwoMergeIterator<TxnLocalIterator, FusedIterator<LsmIterator>>,
     ) -> Result<Self> {
-        unimplemented!()
+        let mut txn_iter = Self { txn, iter };
+        txn_iter.move_to_non_delete()?;
+        txn_iter.record_read_key();
+        Ok(txn_iter)
+    }
+
+    fn record_read_key(&self) {
+        if !self.iter.is_valid() {
+            return;
+        }
+        if let Some(key_hashes) = &self.txn.key_hashes {
+            let key_hash = farmhash::hash32(self.iter.key());
+            key_hashes.lock().1.insert(key_hash);
+        }
+    }
+
+    fn skip_key(&mut self) -> Result<()> {
+        let key = Bytes::copy_from_slice(self.iter.key());
+        while self.iter.is_valid() && self.iter.key() == key.as_ref() {
+            self.iter.next()?;
+        }
+        Ok(())
+    }
+
+    fn move_to_non_delete(&mut self) -> Result<()> {
+        while self.iter.is_valid() && self.iter.value().is_empty() {
+            self.skip_key()?;
+        }
+        Ok(())
     }
 }
 
@@ -136,7 +207,10 @@ impl StorageIterator for TxnIterator {
     }
 
     fn next(&mut self) -> Result<()> {
-        unimplemented!()
+        self.skip_key()?;
+        self.move_to_non_delete()?;
+        self.record_read_key();
+        Ok(())
     }
 
     fn num_active_iterators(&self) -> usize {
